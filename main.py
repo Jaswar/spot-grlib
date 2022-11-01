@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 import os
 import io
 from PIL import Image
+import cv2.cv2 as cv
 
 
 def create_classifier(pipeline):
@@ -65,11 +66,15 @@ def recognize_gestures(robot, model, pipeline, fp_filter):
         # Retrieve image from the arm camera
         # TODO: Replace to match arm camera
         image_response = image_client.get_image_from_sources(['frontleft_fisheye_image'])
-        image = Image.open(io.BytesIO(image_response.shot.image.data))
+        image = np.array(Image.open(io.BytesIO(image_response.shot.image.data)))
+
+        cv.imshow('Image', image)
+        if cv.waitKey(1) & 0xFF == ord('q'):
+            break
 
         # Process the image through the pipeline and run prediction
         # TODO: maybe let get_world_landmarks_from_image already return flattened list so we dont have to do it here
-        landmarks = pipeline.get_world_landmarks_from_image(np.array(image)).flatten().tolist()
+        landmarks = pipeline.get_world_landmarks_from_image(image).flatten().tolist()
         pipeline.optimize()
         prediction = model.predict(landmarks)
 
@@ -79,6 +84,8 @@ def recognize_gestures(robot, model, pipeline, fp_filter):
                 stand_low(command_client)
             else:
                 stand_high(command_client)
+
+    cv.destroyAllWindows()
 
 
 def main():
