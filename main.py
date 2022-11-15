@@ -1,4 +1,5 @@
 import numpy as np
+from grlib.exceptions import NoHandDetectedException
 from grlib.load_data.by_folder_loader import ByFolderLoader
 from grlib.feature_extraction.pipeline import Pipeline
 from grlib.filter.false_positive_filter import FalsePositiveFilter
@@ -44,12 +45,29 @@ def create_classifier(pipeline):
 # TODO: Maybe figure out how exactly it is going to stand before we run it (so we don't break something)
 # TODO: The methods are synchronous now, maybe make them async somehow
 def stand_low(command_client):
-    cmd = RobotCommandBuilder.synchro_stand_command(body_height=0.05)
+    cmd = RobotCommandBuilder.synchro_stand_command(body_height=0.0)
     command_client.robot_command(cmd)
 
 
 def stand_high(command_client):
-    cmd = RobotCommandBuilder.synchro_stand_command(body_height=0.2)
+    cmd = RobotCommandBuilder.synchro_stand_command(body_height=0.5)
+    command_client.robot_command(cmd)
+
+
+def move_right(command_client):
+    # velocity_command is deprecated so we will see what happens
+    cmd = RobotCommandBuilder.velocity_command(5, 0, 0)
+    command_client.robot_command_async(cmd, 10)
+
+
+def move_left(command_client):
+    # velocity_command is deprecated so we will see what happens
+    cmd = RobotCommandBuilder.velocity_command(-5, 0, 0)
+    command_client.robot_command_async(cmd, 10)
+
+
+def stop(command_client):
+    cmd = RobotCommandBuilder.stop_command()
     command_client.robot_command(cmd)
 
 
@@ -57,7 +75,6 @@ def recognize_gestures(robot, model, pipeline, fp_filter):
     # Initialize an ImageClient
     image_client = robot.ensure_client(ImageClient.default_service_name)
     sources = image_client.list_image_sources()
-    print(sources)
 
     # Create a command client to be able to command the robot
     command_client = robot.ensure_client(RobotCommandClient.default_service_name)
@@ -65,8 +82,8 @@ def recognize_gestures(robot, model, pipeline, fp_filter):
     while True:
         # Retrieve image from the arm camera
         # TODO: Replace to match arm camera
-        image_response = image_client.get_image_from_sources(['frontleft_fisheye_image'])
-        image = np.array(Image.open(io.BytesIO(image_response.shot.image.data)))
+        image_response = image_client.get_image_from_sources(['hand_color_image'])[0]
+        image = np.array(Image.open(io.BytesIO(image_response.shot.image.data)))[:, :, ::-1]
 
         cv.imshow('Image', image)
         if cv.waitKey(1) & 0xFF == ord('q'):
@@ -74,16 +91,28 @@ def recognize_gestures(robot, model, pipeline, fp_filter):
 
         # Process the image through the pipeline and run prediction
         # TODO: maybe let get_world_landmarks_from_image already return flattened list so we dont have to do it here
-        landmarks = pipeline.get_world_landmarks_from_image(image).flatten().tolist()
-        pipeline.optimize()
-        prediction = model.predict(landmarks)
+        try:
+            landmarks = pipeline.get_world_landmarks_from_image(image)
+            pipeline.optimize()
+            prediction = model.predict(np.expand_dims(landmarks, axis=0))
 
-        # Check if gesture is valid and if so do the corresponding action
-        if fp_filter.is_relevant(landmarks):
-            if prediction == model.classes_[0]:
-                stand_low(command_client)
+            # Check if gesture is valid and if so do the corresponding action
+            print(fp_filter.closest_representative(landmarks))
+            if fp_filter.is_relevant(landmarks):
+                if prediction == 'left':
+                    move_left(command_client)
+                elif prediction == 'right':
+                    move_right(command_client)
+                elif prediction == 'stop':
+                    stop(command_client)
+                elif prediction == 'up':
+                    stand_high(command_client)
+                elif prediction == 'down':
+                    stand_low(command_client)
             else:
-                stand_high(command_client)
+                print('Not valid')
+        except NoHandDetectedException:
+            print('No hand')
 
     cv.destroyAllWindows()
 

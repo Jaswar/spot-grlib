@@ -20,7 +20,7 @@ def save_image(image: np.array, y: str):
 if __name__ == '__main__':
     camera = cv.VideoCapture(0)
 
-    cls = 'g2'
+    cls = 'down'
 
     while True:
         ret, frame = camera.read()
