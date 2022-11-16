@@ -1,4 +1,8 @@
+import time
+
 import numpy as np
+import pandas as pd
+
 from grlib.exceptions import NoHandDetectedException
 from grlib.load_data.by_folder_loader import ByFolderLoader
 from grlib.feature_extraction.pipeline import Pipeline
@@ -9,6 +13,7 @@ from grlib.trajectory.trajectory_classifier import TrajectoryClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score
+from sklearn.linear_model import LogisticRegression
 import bosdyn.client
 import bosdyn.client.lease
 import bosdyn.client.util
@@ -39,14 +44,14 @@ def stand_high(command_client):
 
 def move_right(command_client):
     # velocity_command is deprecated so we will see what happens
-    cmd = RobotCommandBuilder.velocity_command(5, 0, 0)
-    command_client.robot_command_async(cmd, 10)
+    cmd = RobotCommandBuilder.synchro_velocity_command(0, 0.4, 0)
+    command_client.robot_command(cmd, end_time_secs=time.time() + 1)
 
 
 def move_left(command_client):
     # velocity_command is deprecated so we will see what happens
-    cmd = RobotCommandBuilder.velocity_command(-5, 0, 0)
-    command_client.robot_command_async(cmd, 10)
+    cmd = RobotCommandBuilder.synchro_velocity_command(0, -0.4, 0)
+    command_client.robot_command(cmd, end_time_secs=time.time() + 1)
 
 
 def stop(command_client):
@@ -56,9 +61,10 @@ def stop(command_client):
 
 def recognize_gestures(robot, pipeline):
     loader = DynamicGestureLoader(
-        pipeline, 'left_right_dataset', trajectory_zero_precision=ZERO_PRECISION, key_frames=3
+        pipeline, 'left_right_dataset', trajectory_zero_precision=ZERO_PRECISION,
+        key_frames=3
     )
-    #loader.create_landmarks()
+    # loader.create_landmarks()
 
     landmarks = loader.load_landmarks()
     trajectories = loader.load_trajectories()
@@ -69,11 +75,24 @@ def recognize_gestures(robot, pipeline):
     trajectory_classifier.fit(np.array(x_traj), y)
 
     start_shapes = loader.get_start_shape(landmarks, NUM_HANDS)
+    start_detection_model = LogisticRegression()
+    start_detection_model.fit(np.array(start_shapes), y)
+
+    fp_data = pd.DataFrame(np.array(start_shapes))
+    # one hand ONLY
+    df2 = pd.DataFrame(np.ones(len(np.array(start_shapes))))
+    df2.columns = ['handedness 1']
+    fp_data = pd.concat([fp_data, df2], axis=1)
+    fp_data['label'] = np.array(y)
+    fp_filter = FalsePositiveFilter(fp_data, 'cosine', confidence=0.7)
+
+    run_pipeline = Pipeline(3)
+    run_pipeline.add_stage(0, 0)
 
     detector = DynamicDetector(
-        start_shapes,
+        start_detection_model,
         y,
-        pipeline,
+        run_pipeline,
         start_pos_confidence=0.1,
         trajectory_classifier=trajectory_classifier,
         update_candidates_every=5,
@@ -98,8 +117,17 @@ def recognize_gestures(robot, pipeline):
 
         # Process the image through the pipeline and run prediction
         try:
-            detector.analyze_frame(image)
-            prediction = detector.last_pred
+            landmarks, handedness, hand_position = detector.extract_landmarks(image)
+            landmarks_reduced, handedness = fp_filter.drop_wrong_hands(landmarks, handedness)
+            if len(landmarks_reduced) != 0:
+                print(f'i see a hand {len(landmarks_reduced)}')
+                detector.analyze_frame(landmarks_reduced[0:63], hand_position)
+            else:
+                detector.analyze_frame(landmarks[0:63], hand_position)
+
+            prediction = ''
+            if detector.last_time_pred > detector.frame_cnt - 30:
+                prediction = detector.last_pred
             if prediction == 'left':
                 move_left(command_client)
             elif prediction == 'right':
