@@ -17,16 +17,17 @@ import os
 import io
 from PIL import Image
 import cv2.cv2 as cv
+import time
 
 
 def create_classifier(pipeline):
     # Create, train and test a model for static gesture recognition
-    loader = ByFolderLoader(pipeline, path='./out')
-    loader.create_landmarks()
+    loader = ByFolderLoader(pipeline, path='./out', max_hands=1)
+    #loader.create_landmarks()
 
     dataset = loader.load_landmarks()
     X = dataset.iloc[:, :63]
-    y = dataset.iloc[:, 63]
+    y = dataset.iloc[:, 64]
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
 
@@ -56,14 +57,14 @@ def stand_high(command_client):
 
 def move_right(command_client):
     # velocity_command is deprecated so we will see what happens
-    cmd = RobotCommandBuilder.velocity_command(5, 0, 0)
-    command_client.robot_command_async(cmd, 10)
+    cmd = RobotCommandBuilder.synchro_velocity_command(0, 0.4, 0)
+    command_client.robot_command(cmd, end_time_secs=time.time() + 3)
 
 
 def move_left(command_client):
     # velocity_command is deprecated so we will see what happens
-    cmd = RobotCommandBuilder.velocity_command(-5, 0, 0)
-    command_client.robot_command_async(cmd, 10)
+    cmd = RobotCommandBuilder.synchro_velocity_command(0, -0.4, 0)
+    command_client.robot_command(cmd, end_time_secs=time.time() + 3)
 
 
 def stop(command_client):
@@ -72,6 +73,9 @@ def stop(command_client):
 
 
 def recognize_gestures(robot, model, pipeline, fp_filter):
+    secondary_pipeline = Pipeline(4)
+    secondary_pipeline.add_stage(0, 0)
+
     # Initialize an ImageClient
     image_client = robot.ensure_client(ImageClient.default_service_name)
     sources = image_client.list_image_sources()
@@ -92,13 +96,16 @@ def recognize_gestures(robot, model, pipeline, fp_filter):
         # Process the image through the pipeline and run prediction
         # TODO: maybe let get_world_landmarks_from_image already return flattened list so we dont have to do it here
         try:
-            landmarks = pipeline.get_world_landmarks_from_image(image)
-            pipeline.optimize()
-            prediction = model.predict(np.expand_dims(landmarks, axis=0))
+            # detect hands on the picture. You can detect more hands than you intend to recognize
+            landmarks, handedness = secondary_pipeline.get_world_landmarks_from_image(image)
+            # drop non-suiting ones
+            landmarks, handedness = fp_filter.drop_wrong_hands(landmarks, handedness)
+            secondary_pipeline.optimize()
 
-            # Check if gesture is valid and if so do the corresponding action
-            print(fp_filter.closest_representative(landmarks))
-            if fp_filter.is_relevant(landmarks):
+            if len(landmarks) != 0:
+                prediction = model.predict(np.expand_dims(landmarks[0:63], axis=0))[0]
+                print(prediction)
+
                 if prediction == 'left':
                     move_left(command_client)
                 elif prediction == 'right':
@@ -110,7 +117,7 @@ def recognize_gestures(robot, model, pipeline, fp_filter):
                 elif prediction == 'down':
                     stand_low(command_client)
             else:
-                print('Not valid')
+                pass
         except NoHandDetectedException:
             print('No hand')
 
@@ -142,7 +149,7 @@ def main():
         assert robot.is_powered_on(), "Robot power on failed."
 
         # Create false-positive filter to recognize only meaningful gestures
-        fp_filter = FalsePositiveFilter(dataset)
+        fp_filter = FalsePositiveFilter(dataset, confidence=0.8)
         # Start recognizing gestures
         recognize_gestures(robot, model, pipeline, fp_filter)
 
